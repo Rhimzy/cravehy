@@ -12,6 +12,7 @@ import random
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Function to parse category HTML (finding links by href prefix) ---
+# (Keep parse_categories_html_v2 as is)
 def parse_categories_html_v2(html_content):
     """
     Parses the HTML content of the categories page to extract subcategory URLs
@@ -52,16 +53,17 @@ def parse_categories_html_v2(html_content):
         logging.error(f"An unexpected error occurred during HTML parsing (v2): {e}")
         return []
 
-    # Remove duplicates based on URL
     unique_subcategories = list({subcat['url']: subcat for subcat in subcategories_list}.values())
     logging.info(f"Reduced to {len(unique_subcategories)} unique subcategory URLs.")
     return unique_subcategories
 
 
-# --- Function to fetch category HTML using Playwright (with automated location setting) ---
-async def get_categories_with_playwright_v4(url="https://blinkit.com/categories", location_query="Mumbai"):
+# --- Function to fetch category HTML using Playwright (with automated location setting - v10) ---
+async def get_categories_with_playwright_v10(url="https://blinkit.com/categories", location_query="Mumbai"):
     """
     Fetches the Blinkit categories page using Playwright, automates setting location.
+    Uses the previously working class-based selector for the location trigger.
+    Increased timeout for location trigger.
     Set headless=False for visual debugging.
     """
     logging.info(f"Launching browser to fetch: {url}")
@@ -74,27 +76,38 @@ async def get_categories_with_playwright_v4(url="https://blinkit.com/categories"
             page = await browser.new_page()
 
             logging.info(f"Navigating to {url}...")
-            # Wait for the initial page to load
             await page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
-            logging.info("Page loaded. Attempting to set location...")
+            # --- Generic initial wait for page body content ---
+            try:
+                 logging.info("Waiting for page body to contain some content...")
+                 await page.wait_for_selector('body > div:first-child', state='visible', timeout=10000)
+                 logging.info("Page body content appears loaded.")
+            except Exception:
+                 logging.warning("Initial wait for body content timed out. Proceeding.")
+            # --- End generic initial wait ---
+
+
+            logging.info("Attempting to set location...")
 
             # --- Automated Location Setting Logic ---
             try:
-                # 1. Click on the element that opens the location picker in the header
-                # Selector based on previous observation and HTML
+                # 1. Use the previously working class-based selector for the location picker trigger
                 location_picker_selector = 'div.LocationBar__Container-sc-x8ezho-6'
                 logging.info(f"Waiting for location picker trigger: {location_picker_selector}")
-                await page.wait_for_selector(location_picker_selector, timeout=15000)
+                # Increased timeout for this specific selector
+                await page.wait_for_selector(location_picker_selector, state='visible', timeout=20000) # Increased timeout
                 logging.info("Location picker trigger found. Clicking...")
+
+                await asyncio.sleep(1) # Small delay before clicking
+
                 await page.click(location_picker_selector)
                 logging.info("Clicked location picker trigger.")
 
                 # 2. Wait for the location search input field to appear in the dialog
-                # Selector based on provided dialog HTML
                 location_input_selector = 'input[name="select-locality"][placeholder*="search delivery location"]'
                 logging.info(f"Waiting for location input field: {location_input_selector}")
-                await page.wait_for_selector(location_input_selector, timeout=15000)
+                await page.wait_for_selector(location_input_selector, state='visible', timeout=15000)
                 logging.info("Location input field found.")
 
                 # 3. Type the desired location
@@ -103,19 +116,20 @@ async def get_categories_with_playwright_v4(url="https://blinkit.com/categories"
                 logging.info("Typed location query.")
 
                 # 4. Wait for location suggestions to appear and click the first one
-                # Selector based on provided dialog HTML
                 suggestion_selector = 'div.LocationSearchList__LocationListContainer-sc-93rfr7-0'
                 logging.info(f"Waiting for location suggestions to appear (e.g., '{suggestion_selector}')...")
-                await page.wait_for_selector(suggestion_selector, timeout=15000) # Wait for the first suggestion item
+                await page.wait_for_selector(suggestion_selector, state='visible', timeout=15000) # Wait for the first suggestion item
                 logging.info("Suggestions appeared. Clicking the first one.")
                 await page.click(suggestion_selector) # Click the first suggestion item
                 logging.info("Clicked the first suggestion.")
 
                 # 5. Wait for the page to update/reload after setting location
-                # Wait specifically for the category links to appear, as this indicates success
+                # Wait for network idle and then confirm presence of category links
                 category_links_selector = 'a[href^="/cn/"]'
-                logging.info(f"Waiting for category links to appear ({category_links_selector})...")
-                await page.wait_for_selector(category_links_selector, timeout=30000) # Wait up to 30 seconds for categories to load
+                logging.info(f"Waiting for page update and category links to appear ({category_links_selector})...")
+                await page.wait_for_load_state('networkidle', timeout=45000)
+                await page.wait_for_selector(category_links_selector, state='visible', timeout=15000) # Increased timeout
+
                 logging.info("Category links appear to be loaded after setting location.")
 
 
@@ -125,7 +139,6 @@ async def get_categories_with_playwright_v4(url="https://blinkit.com/categories"
             # --- End Automated Location Setting Logic ---
 
 
-            # Get the full HTML content after the page is rendered and location is hopefully set
             html_content = await page.content()
             logging.info(f"Fetched {len(html_content)} bytes of rendered HTML.")
 
@@ -133,96 +146,287 @@ async def get_categories_with_playwright_v4(url="https://blinkit.com/categories"
             logging.error(f"An error occurred during Playwright execution: {e}")
         finally:
             if browser:
-                # Keep the browser open briefly for inspection if needed
                 logging.info("Keeping browser open for 10 seconds for inspection...")
-                await asyncio.sleep(10)
+                await asyncio.sleep(10) # Keep browser open for 10 seconds
                 await browser.close()
                 logging.info("Browser closed.")
 
     return html_content
 
-# --- Function to scrape product links from a category URL using the API (no changes) ---
-# (Keep the scrape_products_from_category_api function as is)
-def scrape_products_from_category_api(category_url):
+# --- Function to scrape product IDs from a category PLP using Playwright (v10 - scrolling container & ID extraction) ---
+async def scrape_product_ids_from_plp_v10(page, category_url):
     """
-    Scrapes product data from a single category URL using the internal API.
+    Navigates to a category URL using an existing Playwright page,
+    scrolls within the product list container to load all products,
+    and extracts product IDs from the product card divs.
+
+    Args:
+        page: An existing Playwright Page object.
+        category_url (str): The URL of the category listing page (PLP).
+
+    Returns:
+        set: A set of unique product IDs (strings).
+             Returns an empty set if fetching or scraping fails.
     """
-    current_api_url = None
+    logging.info(f"Navigating to category PLP: {category_url}")
+    product_ids = set()
+    last_count = -1
+    scroll_attempts = 0
+    max_scroll_attempts = 40 # Increased max scroll attempts
 
-    match = re.search(r'/cid/(\d+)/(\d+)', category_url)
-    if not match:
-        logging.error(f"Could not extract category IDs from URL: {category_url}")
-        return set()
+    # --- PRODUCT LIST CONTAINER SELECTOR ---
+    # Based on the HTML snippet you provided
+    PRODUCT_LIST_CONTAINER_SELECTOR = '#plpContainer'
+    # --- END SELECTOR ---
 
-    l0_cat = match.group(1)
-    l1_cat = match.group(2)
-    initial_offset = 0
-    limit = 20
+    # --- PRODUCT CARD SELECTOR ---
+    # Based on the HTML snippet - divs with id, tabindex="0", role="button"
+    PRODUCT_CARD_SELECTOR = f'{PRODUCT_LIST_CONTAINER_SELECTOR} div[id][tabindex="0"][role="button"]'
+    # --- END SELECTOR ---
 
-    base_api_endpoint = "https://blinkit.com/v1/layout/listing_widgets"
-    current_api_url = f"{base_api_endpoint}?offset={initial_offset}&limit={limit}&l0_cat={l0_cat}&l1_cat={l1_cat}&exclude_combos=false&oos_visibility=true"
 
-    logging.info(f"Starting API scraping for category: {category_url}")
+    try:
+        await page.goto(category_url, wait_until='domcontentloaded', timeout=60000)
+        logging.info("Category PLP DOM loaded. Waiting for product container and products...")
+
+        # Wait for the scrollable container to be visible
+        try:
+            logging.info(f"Waiting for product list container: {PRODUCT_LIST_CONTAINER_SELECTOR}")
+            await page.wait_for_selector(PRODUCT_LIST_CONTAINER_SELECTOR, state='visible', timeout=20000)
+            logging.info("Product list container found.")
+        except Exception:
+            logging.error(f"Product list container '{PRODUCT_LIST_CONTAINER_SELECTOR}' not found within 20 seconds. Cannot scroll.")
+            return set()
+
+
+        # --- Initial wait for products and retry logic ---
+        initial_wait_attempts = 5
+        for attempt in range(initial_wait_attempts):
+            try:
+                logging.info(f"Attempt {attempt + 1}/{initial_wait_attempts}: Waiting for initial product cards within container: {PRODUCT_CARD_SELECTOR}")
+                # Wait for at least 1 product card to be visible
+                await page.wait_for_selector(PRODUCT_CARD_SELECTOR, state='visible', timeout=10000)
+                logging.info("Initial product cards appeared.")
+                break # Exit retry loop if successful
+            except Exception:
+                logging.warning(f"Attempt {attempt + 1} failed: Did not find initial product cards within 10 seconds. Retrying...")
+                await asyncio.sleep(random.uniform(2, 4)) # Wait before retry
+        else: # This block executes if the loop completes without 'break' (all attempts failed)
+             logging.error(f"Failed to find any product cards after {initial_wait_attempts} attempts. Proceeding with scrolling, but likely no products are loaded.")
+        # --- End initial wait and retry ---
+
+
+        while scroll_attempts < max_scroll_attempts:
+            # Get the current number of product cards within the container
+            current_cards = await page.query_selector_all(PRODUCT_CARD_SELECTOR)
+            current_count = len(current_cards)
+            logging.info(f"Scroll attempt {scroll_attempts + 1}: Found {current_count} product cards so far in container.")
+
+            # Check if new products loaded since last scroll
+            if current_count > 0 and current_count == last_count:
+                logging.info("No new products loaded after scrolling within container. Reached end of category or dynamic loading stopped.")
+                break
+
+            last_count = current_count
+
+            # Scroll down the *container*
+            await page.evaluate(f"""() => {{
+                const container = document.querySelector('{PRODUCT_LIST_CONTAINER_SELECTOR}');
+                if (container) {{
+                    container.scrollTo(0, container.scrollHeight);
+                }}
+            }}""")
+            logging.info("Scrolled container down.")
+
+            # Wait briefly for new content to appear after scrolling the container
+            try:
+                # Wait for the number of product cards *within the container* to increase
+                await asyncio.sleep(1) # Small delay before checking the count
+                await page.wait_for_function(f"""() => {{
+                    const container = document.querySelector('{PRODUCT_LIST_CONTAINER_SELECTOR}');
+                    if (!container) return false;
+                    return container.querySelectorAll('{PRODUCT_CARD_SELECTOR}').length > {current_count};
+                }}""", timeout=15000) # Increased timeout for wait_for_function
+                logging.info("Detected new product cards after scrolling container.")
+            except Exception:
+                logging.warning("Timeout or no new product cards detected after scrolling container. May have reached the end.")
+                # If we timed out waiting for new products, it might mean the end, so we break the scroll loop
+                # Re-query the cards to make sure the count hasn't actually increased just after the wait
+                final_check_cards = await page.query_selector_all(PRODUCT_CARD_SELECTOR)
+                if len(final_check_cards) > 0 and len(final_check_cards) == last_count:
+                     logging.info("Confirmed no new product cards after waiting. Ending scroll.")
+                     break
+
+
+            scroll_attempts += 1
+            await asyncio.sleep(random.uniform(1, 3)) # Delay between scrolls
+
+        logging.info(f"Finished scrolling after {scroll_attempts} attempts (max {max_scroll_attempts}).")
+
+        # Extract all product IDs from the product cards after scrolling is complete
+        final_cards = await page.query_selector_all(PRODUCT_CARD_SELECTOR)
+        logging.info(f"Total product cards found after scrolling: {len(final_cards)}")
+
+        for card in final_cards:
+            product_id = await card.get_attribute('id')
+            if product_id:
+                product_ids.add(product_id) # Add to set for uniqueness
+
+        logging.info(f"Extracted {len(product_ids)} unique product IDs from {category_url}")
+
+    except Exception as e:
+        logging.error(f"An error occurred while scraping PLP {category_url}: {e}")
+
+    return product_ids # Return set of product IDs
+
+
+# --- Function to scrape detailed data from a PDP using requests and JSON ---
+# (Keep scrape_detailed_product_data as is, it will now be called with IDs from the set)
+def scrape_detailed_product_data(product_id): # Now takes product_id
+    """
+    Fetches a single product detail page (using product ID) and extracts detailed information
+    from the embedded JSON (window.grofers.PRELOADED_STATE).
+    """
+    # Construct the PDP URL using the product ID
+    # Based on previous PDP URLs, format seems to be /prn/{slug}/prid/{id}
+    # The slug might not be strictly necessary, let's use a generic one
+    product_url = f"https://blinkit.com/prn/product/prid/{product_id}" # Constructed URL
+
+    product_data = [] # List to hold data for all variants of this product group
+
+    logging.info(f"Fetching detailed data for PDP: {product_url} (ID: {product_id})")
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': category_url,
+        'Referer': 'https://blinkit.com/', # Referer could be categories or a PLP (using base URL)
         'DNT': '1',
         'Connection': 'keep-alive',
-         'X-Requested-With': 'XMLHttpRequest',
     }
 
-    product_ids_in_category = set()
+    try:
+        response = requests.get(product_url, headers=headers, timeout=30)
+        response.raise_for_status() # Check for 4xx/5xx errors
 
-    while current_api_url:
-        try:
-            response = requests.get(current_api_url, headers=headers, timeout=20)
-            response.raise_for_status()
-
-            data = response.json()
-
-            snippets = data.get('response', {}).get('snippets', [])
-            if not snippets:
-                 logging.info("No snippets found in API response, likely end of category or error.")
-                 break
-
-            for snippet in snippets:
-                if snippet.get('widget_type') == 'product_card_snippet_type_2':
-                    product_data = snippet.get('data', {})
-                    product_id = product_data.get('identity', {}).get('id') or product_data.get('product_id')
-
-                    if product_id:
-                         product_ids_in_category.add(product_id)
-
-            next_url_path = data.get('response', {}).get('pagination', {}).get('next_url')
-
-            if next_url_path:
-                current_api_url = f"https://blinkit.com{next_url_path}"
-                time.sleep(random.uniform(1, 3))
-            else:
-                current_api_url = None
-
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error fetching API page {current_api_url}: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                 logging.error(f"HTTP Status Code: {e.response.status_code}")
-            current_api_url = None
-        except Exception as e:
-            logging.error(f"An unexpected error occurred during API processing for {current_api_url}: {e}")
-            current_api_url = None
+        # Check if the final URL after redirects is still a valid PDP URL
+        # Sometimes sites redirect if the slug is wrong, but the ID might lead to the right page
+        # If it redirects away from a PDP pattern, it might be an invalid ID or product
+        if '/prid/' not in response.url:
+             logging.warning(f"Redirected away from expected PDP URL pattern for ID {product_id}. Final URL: {response.url}")
+             return [] # Skip if it didn't land on a PDP
 
 
-    logging.info(f"Finished API scraping for category: {category_url}. Found {len(product_ids_in_category)} unique product IDs in this category.")
-    return product_ids_in_category
+        soup = BeautifulSoup(response.content, 'lxml')
+
+        script_tag = soup.find('script', string=re.compile(r'window\.grofers\.PRELOADED_STATE = \{'))
+
+        if not script_tag:
+            logging.error(f"Could not find PRELOADED_STATE script tag on {product_url} (ID: {product_id})")
+            # Optionally save the HTML content for inspection if this happens unexpectedly
+            # with open(f"failed_json_id_{product_id}.html", "w", encoding="utf-8") as f:
+            #     f.write(response.text)
+            return []
+
+        json_string = script_tag.string
+        json_string = json_string.replace('window.grofers.PRELOADED_STATE = ', '').strip()
+        if json_string.endswith(';'):
+            json_string = json_string[:-1]
+
+        state_data = json.loads(json_string)
+
+        variants_info = state_data.get('data', {}).get('ui', {}).get('pdp', {}).get('rawData', {}).get('data', {}).get('variants_info', [])
+
+        if not variants_info:
+             single_product_data = state_data.get('data', {}).get('ui', {}).get('pdp', {}).get('rawData', {}).get('data', {}).get('product')
+             if single_product_data:
+                  variants_info = [single_product_data]
+                  logging.warning(f"variants_info not found for ID {product_id}, using single product data as fallback.")
+             else:
+                logging.error(f"No variant or single product data found in PRELOADED_STATE for ID {product_id}")
+                return []
+
+        for variant in variants_info:
+            # Use the product_id from the outer scope if variant's id is missing, or use variant's id
+            variant_product_id = variant.get('id') or variant.get('product_id') or product_id
+            if not variant_product_id:
+                 logging.warning(f"Skipping variant due to missing product_id for group ID {product_id}: {variant.get('name')}")
+                 continue
+
+            variant_data = {
+                'product_id': variant_product_id, # Use the ID found in the variant data
+                'group_id': variant.get('group_id'), # Group ID links variants together
+                'name': variant.get('name'),
+                'brand': variant.get('brand'),
+                'category_l0': variant.get('level0_category', [{}])[0].get('name') if variant.get('level0_category') else None,
+                'category_l1': variant.get('level1_category', [{}])[0].get('name') if variant.get('level1_category') else None,
+                'unit': variant.get('unit'),
+                'price': variant.get('price'),
+                'original_price': variant.get('mrp'),
+                'inventory': variant.get('inventory'),
+                'product_url': response.url, # Store the final URL after redirects
+                'image_urls': [item.get('image', {}).get('url') for item in variant.get('assets', []) if item and item.get('media_type') == 'image' and item.get('image', {}).get('url')],
+                'nutrition_info': None,
+                'ingredients': None,
+                'key_features': None
+            }
+
+            attribute_collections = variant.get('attribute_collection', [])
+            for collection in attribute_collections:
+                attributes = collection.get('attributes', [])
+                for attr in attributes:
+                    if attr.get('title') == 'Nutrition Information' and attr.get('value'):
+                         variant_data['nutrition_info'] = attr.get('value').strip()
+                    elif attr.get('title') == 'Ingredients' and attr.get('value'):
+                         variant_data['ingredients'] = attr.get('value').strip()
+                    elif attr.get('title') == 'Key Features' and attr.get('value'):
+                         variant_data['key_features'] = attr.get('value').strip()
+
+            parsed_nutrition = {}
+            nutrition_text = variant_data.get('nutrition_info')
+            if nutrition_text:
+                lines = nutrition_text.split('\n')
+                if lines:
+                    serving_size_line = lines[0]
+                    serving_size_match = re.match(r'Per (.*)', serving_size_line)
+                    if serving_size_match:
+                        parsed_nutrition['serving_size'] = serving_size_match.group(1).strip()
+                        lines = lines[1:]
+
+                for line in lines:
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        parsed_nutrition[key.strip()] = value.strip()
+            variant_data['nutrition_info'] = parsed_nutrition
+
+            product_data.append(variant_data)
+
+        logging.info(f"Successfully extracted data for {len(product_data)} variants from PDP ID {product_id}")
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching PDP URL {product_url} (ID: {product_id}): {e}")
+        if hasattr(e, 'response') and e.response is not None:
+             logging.error(f"HTTP Status Code: {e.response.status_code}")
+        return []
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON from PRELOADED_STATE on PDP URL {product_url} (ID: {product_id}): {e}")
+        # Optionally save the HTML content for inspection if this happens unexpectedly
+        # with open(f"failed_json_id_{product_id}.html", "w", encoding="utf-8") as f:
+        #     f.write(response.text)
+        return []
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during PDP scraping for URL {product_url} (ID: {product_id}): {e}")
+        return []
+
+    return product_data
 
 
 # --- Main execution block ---
 async def main():
     categories_url = "https://blinkit.com/categories"
     # Step 1: Get HTML for categories page using Playwright, including location setting attempt
-    html_content = await get_categories_with_playwright_v4(categories_url, location_query="Mumbai") # Use v4, specify location
+    # Keep headless=False here initially to ensure location setting is visually confirmed
+    html_content = await get_categories_with_playwright_v10(categories_url, location_query="Mumbai") # Use v10
 
     if not html_content:
         logging.error("Could not get HTML content for categories page after attempting location setting. Exiting.")
@@ -233,7 +437,6 @@ async def main():
 
     if not subcategory_urls:
         logging.error("No subcategory URLs found on the categories page using v2 parser after location attempt. Exiting.")
-        # Save the HTML content if we couldn't parse links, might help diagnose
         with open("failed_categories_page_html.html", "w", encoding="utf-8") as f:
             f.write(html_content)
         logging.info("Saved fetched HTML to failed_categories_page_html.html for inspection.")
@@ -242,42 +445,74 @@ async def main():
     logging.info(f"Successfully extracted {len(subcategory_urls)} unique subcategory URLs.")
     # logging.info("Subcategory URLs: " + json.dumps(subcategory_urls, indent=4)) # Uncomment to see list of URLs
 
-    all_unique_product_ids = set()
 
-    # Step 2: Scrape product IDs from each category's API (Still using requests, expected to fail)
-    # We will replace this with Playwright scraping in the next step
-    logging.info("Starting to scrape product IDs from category APIs (EXPECTING 403 errors).")
-    logging.warning("NOTE: The API scraping step is expected to fail with 403. We will replace this with Playwright scraping in the next iteration.")
-    for i, subcategory in enumerate(subcategory_urls):
-        # Limit the number of categories for faster testing if needed
-        # if i >= 5: # Uncomment to test with only the first 5 categories
-        #     logging.info("Limiting to first 5 categories for testing.")
-        #     break
+    all_unique_product_ids = set() # Collect product IDs, not full URLs yet
 
-        logging.info(f"Scraping category {i+1}/{len(subcategory_urls)}: {subcategory['name']} ({subcategory['url']})")
-        # Call the requests-based API scraper - this is expected to fail
-        product_ids_in_current_category = scrape_products_from_category_api(subcategory['url'])
-        all_unique_product_ids.update(product_ids_in_current_category)
-        logging.info(f"Total unique product IDs found so far: {len(all_unique_product_ids)}")
-        # Add a delay even though API calls fail quickly, useful for real scraping
-        time.sleep(random.uniform(2, 5))
+    # Step 2: Scrape product IDs from each category PLP using Playwright
+    logging.info("Starting to scrape product IDs from category PLPs using Playwright...")
+    async with async_playwright() as p:
+         browser = None
+         try:
+              # Launch browser for scraping PLPs
+              # Set headless=False here to watch PLP scraping and scrolling
+              browser = await p.chromium.launch(headless=False) # <--- Set headless=False to debug PLP scraping
+              page = await browser.new_page()
 
-    logging.info(f"\nFinished attempting to scrape product IDs from all categories via API. Total unique product IDs found: {len(all_unique_product_ids)}")
-    if len(all_unique_product_ids) == 0:
-        logging.warning("No product IDs were found during the API scraping phase, as expected due to 403 errors.")
+              for i, subcategory in enumerate(subcategory_urls):
+                  # Limit the number of categories for faster testing if needed
+                  # if i >= 2: # Uncomment to test with only the first 2 categories
+                  #     logging.info("Limiting to first 2 categories for testing.")
+                  #     break
+
+                  logging.info(f"Scraping PLP {i+1}/{len(subcategory_urls)}: {subcategory['name']} ({subcategory['url']})")
+                  # Call the Playwright function to scrape product IDs from this PLP
+                  product_ids_in_category = await scrape_product_ids_from_plp_v10(page, subcategory['url']) # Use v10
+                  all_unique_product_ids.update(product_ids_in_category) # Add unique IDs to the master set
+                  logging.info(f"Total unique product IDs found so far: {len(all_unique_product_ids)}")
+                  await asyncio.sleep(random.uniform(2, 5)) # Add a longer delay between categories
+
+         except Exception as e:
+            logging.error(f"An error occurred during PLP scraping loop: {e}")
+         finally:
+            if browser:
+                await browser.close()
+                logging.info("Browser closed after PLP scraping.")
 
 
-    # Step 3: (Next step - Fetch detailed data for each unique product ID)
-    # We will add the code for fetching PDP data in the next iteration.
-    # For now, we don't have product IDs to save from the failing API step.
-    # We need to replace the API scraping with Playwright scraping of PLP pages.
+    logging.info(f"\nFinished scraping product IDs from all categories. Total unique product IDs found: {len(all_unique_product_ids)}")
 
-    # --- The next step is to replace the scrape_products_from_category_api function
-    # --- with a Playwright function that visits the category URL, scrolls, and extracts
-    # --- the PDP links from the rendered HTML.
-    # --- Then, we'll use those PDP links to scrape the detailed data.
+    # Step 3: Fetch detailed data for each unique product ID (from PDP URLs)
+    logging.info("Starting to scrape detailed data from PDP URLs...")
+    all_detailed_product_data = []
 
-    logging.info("\nNext step: Implement Playwright scraping for product links on PLP pages.")
+    # Convert set to list to iterate
+    product_ids_list = list(all_unique_product_ids)
+
+    # For faster testing, you might want to limit the number of PDPs scraped
+    # product_ids_list = product_ids_list[:10] # Uncomment to scrape only the first 10 PDPs
+    # logging.info(f"Limiting detailed scrape to {len(product_ids_list)} PDPs for testing.")
+
+
+    for i, product_id in enumerate(product_ids_list): # Iterate through product IDs
+        logging.info(f"Scraping PDP {i+1}/{len(product_ids_list)} for Product ID: {product_id}")
+        # Pass the product ID to the detailed scraping function
+        detailed_data = scrape_detailed_product_data(product_id)
+        if detailed_data:
+            all_detailed_product_data.extend(detailed_data) # Add data for all variants
+
+        # Add a delay between PDP requests
+        time.sleep(random.uniform(0.5, 2)) # Shorter delay for individual pages
+
+    logging.info(f"\nFinished scraping detailed data from {len(product_ids_list)} PDPs. Total variants/products scraped: {len(all_detailed_product_data)}")
+
+
+    if all_detailed_product_data:
+        output_filename = "blinkit_all_product_data.json"
+        with open(output_filename, 'w', encoding='utf-8') as f:
+            json.dump(all_detailed_product_data, f, indent=4)
+        logging.info(f"Saved all scraped product data to {output_filename}")
+    else:
+        logging.warning("No detailed product data was scraped.")
 
 
 if __name__ == "__main__":

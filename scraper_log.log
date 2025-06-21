@@ -1,0 +1,26 @@
+2025-06-21 19:05:48,678 - INFO - Starting initial load and location handling.
+2025-06-21 19:05:49,534 - INFO - Navigating to homepage: https://blinkit.com/
+2025-06-21 19:05:51,695 - INFO - Homepage loaded and network idle achieved.
+2025-06-21 19:05:51,736 - INFO - Location input field not visible, but trigger 'div.LocationBar__Container-sc-x8ezho-6' is. Clicking trigger.
+2025-06-21 19:05:51,847 - INFO - Location modal opened by clicking trigger.
+2025-06-21 19:05:51,855 - INFO - Typing location query: Mumbai
+2025-06-21 19:05:51,882 - INFO - Typed location query.
+2025-06-21 19:05:52,800 - INFO - Clicked the first suggestion.
+2025-06-21 19:05:52,827 - INFO - Location setting process completed.
+2025-06-21 19:05:52,863 - INFO - Initial page closed. Browser context is ready for categories/PLPs.
+2025-06-21 19:05:52,863 - INFO - Navigating to categories page: https://blinkit.com/categories
+2025-06-21 19:05:55,123 - INFO - Fetched 79913 bytes of rendered HTML for categories page.
+2025-06-21 19:05:55,161 - INFO - Starting HTML parsing for categories (v2).
+2025-06-21 19:05:55,171 - INFO - Found 434 potential subcategory links.
+2025-06-21 19:05:55,172 - INFO - Finished HTML parsing for categories (v2).
+2025-06-21 19:05:55,172 - INFO - Reduced to 434 unique subcategory URLs.
+2025-06-21 19:05:55,173 - INFO - Successfully extracted 434 unique subcategory URLs.
+2025-06-21 19:05:55,173 - INFO - Starting to scrape product IDs from category PLPs using Playwright (Concurrency: 2)...
+2025-06-21 19:05:55,639 - INFO - Navigating to category PLP: https://blinkit.com/cn/exotic-meat/cid/4/1201
+2025-06-21 19:06:23,963 - ERROR - An error occurred while scraping PLP https://blinkit.com/cn/exotic-meat/cid/4/1201: Page.goto: net::ERR_ABORTED; maybe frame was detached?
+Call log:
+navigating to "https://blinkit.com/cn/exotic-meat/cid/4/1201", waiting until "domcontentloaded"
+
+2025-06-21 19:06:23,966 - ERROR - Error scraping PLP for Exotic Meat (https://blinkit.com/cn/exotic-meat/cid/4/1201): Page.screenshot: Target page, context or browser has been closed
+2025-06-21 19:06:23,968 - WARNING - Could not save screenshot/HTML for error: Page.screenshot: Target page, context or browser has been closed
+2025-06-21 19:06:23,970 - INFO - Finished scraping PLP: Exotic Meat. Total unique PIDs found so far: 0

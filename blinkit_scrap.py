@@ -11,12 +11,11 @@ import os
 
 # --- Configuration ---
 LOG_FILE = "scraper_log.log"
-# Removed PRODUCT_IDS_FILE as PIDs will be stored categorically in JSON
+CATEGORIZED_PIDS_FILE = "blinkit_categorized_pids.json"
 FULL_PRODUCT_DATA_FILE = "blinkit_all_product_data.json"
-CATEGORIZED_PIDS_FILE = "blinkit_categorized_pids.json" # New file for categorical PIDs
 LOCATION_QUERY = "Mumbai"
-MAX_PLP_SCROLL_ATTEMPTS = 60
-PLP_CONCURRENCY = 2
+MAX_PLP_SCROLL_ATTEMPTS = 70 # Max scrolls per PLP
+PLP_CONCURRENCY = 5 # !!! RE-ENABLED CONCURRENCY FOR PLP SCRAPING !!!
 PDP_CONCURRENCY = 10
 
 # Set up logging
@@ -29,7 +28,16 @@ logging.basicConfig(
     ]
 )
 
-# --- Helper functions (no changes to parse_categories_html_v2) ---
+# --- Helper to save PIDs incrementally ---
+def save_pids_incrementally(categorized_pids_dict):
+    """Saves the entire categorized PIDs dictionary to a JSON file."""
+    serializable_dict = {k: list(v) for k, v in categorized_pids_dict.items()}
+    with open(CATEGORIZED_PIDS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(serializable_dict, f, indent=4)
+    logging.info(f"Saved incremental categorized PIDs to {CATEGORIZED_PIDS_FILE}")
+
+
+# --- Function to parse category HTML (finding links by href prefix) ---
 def parse_categories_html_v2(html_content):
     subcategories_list = []
     base_url = "https://blinkit.com"
@@ -58,8 +66,8 @@ def parse_categories_html_v2(html_content):
     return unique_subcategories
 
 
-# --- Function to handle initial load and location setting on the homepage (v15) ---
-async def handle_initial_load_and_location_v15(p_instance, location_query=LOCATION_QUERY):
+# --- Function to handle initial load and location setting on the homepage (v16) ---
+async def handle_initial_load_and_location_v16(p_instance, location_query=LOCATION_QUERY):
     logging.info("Starting initial load and location handling.")
     context = None
     user_data_dir = "./tmp_user_data"
@@ -76,9 +84,24 @@ async def handle_initial_load_and_location_v15(p_instance, location_query=LOCATI
         homepage_url = "https://blinkit.com/"
         logging.info(f"Navigating to homepage: {homepage_url}")
         await page.goto(homepage_url, wait_until='domcontentloaded', timeout=90000)
+        
         await page.wait_for_load_state('load', timeout=30000)
         await page.wait_for_load_state('networkidle', timeout=30000)
         logging.info("Homepage loaded and network idle achieved.")
+
+        # --- Cloudflare/Bot Detection Check ---
+        if await page.is_visible('iframe[src*="cloudflare.com/"]', timeout=5000) or \
+           await page.is_visible('text=Please verify you are human', timeout=5000) or \
+           await page.is_visible('text=Checking your browser before accessing', timeout=5000):
+            logging.warning("Cloudflare or bot detection challenge detected! Please resolve it manually in the browser window.")
+            logging.warning("Press Enter in your console AFTER you have resolved the CAPTCHA/challenge and the actual website content is visible.")
+            await page.bring_to_front()
+            input("Press Enter to continue after solving challenge...")
+            logging.info("Continuing after manual challenge resolution.")
+            await page.wait_for_load_state('networkidle', timeout=60000)
+            logging.info("Page settled after manual resolution.")
+        # --- End Cloudflare/Bot Detection Check ---
+
 
         location_input_selector = 'input[name="select-locality"][placeholder*="search delivery location"]'
         location_picker_trigger_selector = 'div.LocationBar__Container-sc-x8ezho-6'
@@ -141,19 +164,13 @@ async def handle_initial_load_and_location_v15(p_instance, location_query=LOCATI
 
 # --- Function to scrape product IDs from a category PLP using Playwright (v15) ---
 async def scrape_product_ids_from_plp_v15(page, category_url):
-    """
-    Navigates to a category URL using an existing Playwright page,
-    scrolls within the product list container to load all products,
-    and extracts product IDs from the product card divs.
-    Includes robust error handling for "Oops" messages and improved scrolling logic.
-    """
     logging.info(f"Navigating to category PLP: {category_url}")
     product_ids = set()
     scroll_attempts = 0
 
     PRODUCT_LIST_CONTAINER_SELECTOR = '#plpContainer'
     PRODUCT_CARD_SELECTOR = f'{PRODUCT_LIST_CONTAINER_SELECTOR} div[data-pf="reset"][tabindex="0"][role="button"]'
-    error_message_selector = r'text="Oops! Something went wrong. Please try again later."' # Raw string for regex
+    error_message_selector = r'text="Oops! Something went wrong. Please try again later."'
     
     try:
         await page.goto(category_url, wait_until='domcontentloaded', timeout=90000) 
@@ -340,16 +357,12 @@ async def main():
     if os.path.exists(CATEGORIZED_PIDS_FILE):
         os.remove(CATEGORIZED_PIDS_FILE)
         logging.info(f"Cleared previous categorized PIDs file: {CATEGORIZED_PIDS_FILE}")
-    # Also clear the old flat PIDs file if it exists, to avoid confusion
-    # if os.path.exists(PRODUCT_IDS_FILE):
-    #     os.remove(PRODUCT_IDS_FILE)
-    #     logging.info(f"Cleared old flat PIDs file: {PRODUCT_IDS_FILE}")
 
 
     # Use async_playwright context manager at the top level for a single Playwright instance
     async with async_playwright() as p:
         # Step 0: Handle initial load and location setting, get a persistent browser context
-        browser_context_for_all_scraping = await handle_initial_load_and_location_v15(p, location_query=LOCATION_QUERY)
+        browser_context_for_all_scraping = await handle_initial_load_and_location_v16(p, location_query=LOCATION_QUERY)
 
         if not browser_context_for_all_scraping:
             logging.error("Failed to get a persistent browser context with location set. Exiting.")
@@ -392,18 +405,17 @@ async def main():
         logging.info(f"Successfully extracted {len(subcategory_urls)} unique subcategory URLs.")
 
 
-        # New structure to store PIDs categorically
-        all_categorized_product_ids = {} # { "category_url": ["pid1", "pid2"], ... }
-        total_unique_pids_overall = set() # To keep track of overall unique PIDs
+        all_categorized_product_ids = {}
+        total_unique_pids_overall = set()
 
         # Load existing categorized PIDs if file exists (for resuming)
         if os.path.exists(CATEGORIZED_PIDS_FILE):
             try:
                 with open(CATEGORIZED_PIDS_FILE, 'r', encoding='utf-8') as f:
                     loaded_data = json.load(f)
-                    for cat_url, pids in loaded_data.items():
-                        all_categorized_product_ids[cat_url] = set(pids) # Store as sets for efficient updates
-                        total_unique_pids_overall.update(pids)
+                    for cat_url, cat_info in loaded_data.items():
+                        all_categorized_product_ids[cat_url] = {'name': cat_info['name'], 'pids': set(cat_info['pids'])}
+                        total_unique_pids_overall.update(cat_info['pids'])
                 logging.info(f"Loaded {len(all_categorized_product_ids)} categories from {CATEGORIZED_PIDS_FILE}. Total {len(total_unique_pids_overall)} unique PIDs.")
             except json.JSONDecodeError as e:
                 logging.warning(f"Could not load {CATEGORIZED_PIDS_FILE} (JSON error: {e}). Starting fresh for PIDs.")
@@ -416,48 +428,46 @@ async def main():
         
         semaphore_plp = asyncio.Semaphore(PLP_CONCURRENCY)
 
-        async def scrape_plp_task_with_categorization(context_for_task, subcategory_data):
-            category_url = subcategory_data['url']
-            
-            # Skip if this category was already processed and has PIDs
-            if category_url in all_categorized_product_ids and all_categorized_product_ids[category_url]:
-                logging.info(f"Skipping already scraped category: {subcategory_data['name']} ({category_url})")
-                return {category_url: all_categorized_product_ids[category_url]} # Return existing PIDs for this category
-
-            page = await context_for_task.new_page()
-            pids_for_this_category = set()
-            try:
-                pids_for_this_category = await scrape_product_ids_from_plp_v15(page, category_url) 
+        async def scrape_plp_task_wrapper(context_for_task, subcategory_data):
+            async with semaphore_plp:
+                category_url = subcategory_data['url']
+                category_name = subcategory_data['name']
                 
-                # Update main categorized storage and overall unique PIDs
-                all_categorized_product_ids[category_url] = pids_for_this_category
-                total_unique_pids_overall.update(pids_for_this_category)
+                # Skip if this category was already processed and has PIDs
+                if category_url in all_categorized_product_ids and all_categorized_product_ids[category_url]['pids']:
+                    logging.info(f"Skipping already scraped category: {category_name} ({category_url})")
+                    return # Just return, the main dict is already updated
 
-                # Save categorized PIDs incrementally after each category is done
-                # Convert sets to lists for JSON serialization
-                temp_dict_for_save = {k: list(v) for k, v in all_categorized_product_ids.items()}
-                with open(CATEGORIZED_PIDS_FILE, 'w', encoding='utf-8') as f: # Overwrite with updated data
-                    json.dump(temp_dict_for_save, f, indent=4)
-                logging.info(f"Saved incremental categorized PIDs to {CATEGORIZED_PIDS_FILE}")
+                page = await context_for_task.new_page()
+                pids_for_this_category = set()
+                try:
+                    pids_for_this_category = await scrape_product_ids_from_plp_v15(page, category_url) # Use v15
+                    
+                    all_categorized_product_ids[category_url] = {'name': category_name, 'pids': pids_for_this_category}
+                    total_unique_pids_overall.update(pids_for_this_category)
 
-            except Exception as e:
-                logging.error(f"Error scraping PLP for {subcategory_data['name']} ({category_url}): {e}")
-                try: # Attempt to save screenshot/HTML on error
-                    await page.screenshot(path=f"task_error_plp_{category_url.replace('/', '_').replace(':', '_')}.png")
-                    with open(f"task_error_plp_{category_url.replace('/', '_').replace(':', '_')}.html", "w", encoding="utf-8") as f:
-                        f.write(await page.content())
-                except Exception as screenshot_e:
-                    logging.warning(f"Could not save screenshot/HTML for error: {screenshot_e}")
-            finally:
-                await page.close()
-                logging.info(f"Finished scraping PLP: {subcategory_data['name']}. Total unique PIDs found so far: {len(total_unique_pids_overall)}")
-                await asyncio.sleep(random.uniform(2, 5)) # Delay after each category task completes
-            
-            return {category_url: pids_for_this_category} # Return for gather results
+                    save_pids_incrementally(all_categorized_product_ids)
+
+                except Exception as e:
+                    logging.error(f"Error scraping PLP for {category_name} ({category_url}): {e}")
+                    all_categorized_product_ids[category_url] = {'name': category_name, 'pids': set()} 
+                    save_pids_incrementally(all_categorized_product_ids) 
+                    try: 
+                        await page.screenshot(path=f"task_error_plp_{category_url.replace('/', '_').replace(':', '_')}.png")
+                        with open(f"task_error_plp_{category_url.replace('/', '_').replace(':', '_')}.html", "w", encoding="utf-8") as f:
+                            f.write(await page.content())
+                    except Exception as screenshot_e:
+                        logging.warning(f"Could not save screenshot/HTML for error: {screenshot_e}")
+                finally:
+                    await page.close()
+                    logging.info(f"Finished scraping PLP: {category_name}. Total unique PIDs found so far: {len(total_unique_pids_overall)}")
+                    await asyncio.sleep(random.uniform(2, 5)) 
+                
+                return # Task completes
 
 
         tasks_plp = [
-            scrape_plp_task_with_categorization(browser_context_for_all_scraping, subcategory)
+            scrape_plp_task_wrapper(browser_context_for_all_scraping, subcategory)
             for subcategory in subcategory_urls
         ]
         await asyncio.gather(*tasks_plp)
@@ -472,7 +482,7 @@ async def main():
     logging.info(f"Starting to scrape detailed data from PDP IDs (Concurrency: {PDP_CONCURRENCY})...")
     all_detailed_product_data = []
 
-    product_ids_list = list(total_unique_pids_overall) # Use the overall unique PIDs
+    product_ids_list = list(total_unique_pids_overall)
 
     semaphore_pdp = asyncio.Semaphore(PDP_CONCURRENCY)
 
